@@ -16,6 +16,8 @@ from sklearn.ensemble import RandomForestRegressor
 import joblib
 import os
 
+st.set_page_config(page_title="Optimizador de Eventos", layout="wide")
+
 # -------------------------------
 # Estructuras de Datos
 # -------------------------------
@@ -101,34 +103,25 @@ def generate_price_candidates(min_price: float, max_price: float, num_candidates
 
 def generate_valid_combinations(sections: List[Section], scenario: str, 
                              global_min: float, global_max: float, 
-                             margin_factor: float) -> List[List[int]]:
-    """Genera combinaciones válidas de precios ENTEROS respetando el margen progresivamente."""
-    n = len(sections)
-    valid_combos = []
-    # Generar precios de forma progresiva, asegurando el margen desde el inicio
-    def backtrack(prices, idx):
-        if idx == n:
-            valid_combos.append(prices[:])
-            return
-        if idx == 0:
-            # Primera sección: solo puede ser el máximo
-            backtrack([int(round(global_max))], 1)
-        elif idx == n - 1:
-            # Última sección: solo puede ser el mínimo
-            if prices[-1] >= int(round(global_min * margin_factor)):
-                # Si el margen permite, poner el mínimo
-                backtrack(prices + [int(round(global_min))], idx + 1)
+                             margin_factor: float) -> List[List[float]]:
+    """Genera combinaciones válidas de precios ENTEROS de manera eficiente."""
+    candidates = []
+    for i, _ in enumerate(sections):
+        if i == 0:
+            sec_candidates = [float(int(round(global_max)))]
+        elif i == len(sections) - 1:
+            sec_candidates = [float(int(round(global_min)))]
         else:
-            # Secciones intermedias: deben ser <= precio anterior / margen
-            prev_price = prices[-1]
-            max_price = int(prev_price / margin_factor)
-            min_price = int(round(global_min * margin_factor)) if idx < n - 1 else int(round(global_min))
-            for p in range(max_price, min_price - 1, -1):
-                if p < global_min or p > global_max:
-                    continue
-                backtrack(prices + [p], idx + 1)
-    backtrack([], 0)
-    return valid_combos[:100_000]  # Limitar a 100,000 combinaciones por eficiencia
+            sec_candidates = generate_price_candidates(global_min, global_max)
+        candidates.append(sec_candidates)
+    
+    valid = []
+    for combo in itertools.islice(itertools.product(*candidates), 100_000):
+        # Convertir a enteros explícitamente
+        combo_int = [int(round(p)) for p in combo]
+        if all(combo_int[i] >= margin_factor * combo_int[i+1] for i in range(len(combo_int) - 1)):
+            valid.append(combo_int)
+    return valid
 
 def heuristic_price_search(target: float, sections: List[Section], 
                          global_min: float, global_max: float, 
@@ -405,12 +398,19 @@ def calculate_sensitivity_analysis(scenario: Scenario, variation_range: float = 
     
     return pd.DataFrame(variations)
 
+def calculate_maximum_possible_revenue(sections: List[Section], global_max: float, sell_rate: float) -> float:
+    """Calcula el ingreso máximo posible con el precio máximo y la mejor tasa de venta."""
+    return sum(s.seats * global_max * sell_rate for s in sections)
+
+def calculate_minimum_possible_revenue(sections: List[Section], global_min: float, sell_rate: float) -> float:
+    """Calcula el ingreso mínimo posible con el precio mínimo y la peor tasa de venta."""
+    return sum(s.seats * global_min * sell_rate for s in sections)
+
 # -------------------------------
 # Función Principal
 # -------------------------------
 
 def main():
-    st.set_page_config(page_title="Optimizador de Eventos", layout="wide")
     
     # Inicialización de variables de sesión
     if 'current_scenario' not in st.session_state:
@@ -565,14 +565,30 @@ def main():
             
             sections.append(Section(name=name, seats=seats))
     
-    # Validación de límites para evitar combinatoria costosa
-    if st.session_state.num_sections > 4:
-        st.error("El número de secciones es demasiado alto para la optimización exacta. Por favor, usa 4 o menos secciones.")
-        return
-    if st.session_state.global_max - st.session_state.global_min > 5000:
-        st.error("El rango de precios es demasiado amplio para la optimización exacta. Por favor, reduce la diferencia entre precio mínimo y máximo a 5000 o menos.")
-        return
-
+    # Mostrar análisis de ingresos posibles
+    st.header("💰 Análisis de Ingresos Posibles")
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        max_revenue = calculate_maximum_possible_revenue(sections, st.session_state.global_max, max(SELL_RATES.values()))
+        st.metric(
+            "Ingreso Máximo Posible",
+            f"${max_revenue:,.2f}",
+            "Con precio máximo y mejor tasa de venta"
+        )
+    with col2:
+        min_revenue = calculate_minimum_possible_revenue(sections, st.session_state.global_min, min(SELL_RATES.values()))
+        st.metric(
+            "Ingreso Mínimo Posible",
+            f"${min_revenue:,.2f}",
+            "Con precio mínimo y peor tasa de venta"
+        )
+    with col3:
+        st.metric(
+            "Rango de Ingresos",
+            f"${max_revenue - min_revenue:,.2f}",
+            "Diferencia entre máximo y mínimo"
+        )
+    
     # Optimización y visualización
     margin_factor = 1 + (st.session_state.margin / 100)
     scenarios = {
@@ -782,6 +798,22 @@ def generate_excel_report(scenarios: Dict[str, Scenario], presentation_mode: str
                 sensi.to_excel(writer, sheet_name=sensi_sheet_name, index=False)
     output.seek(0)
     return output
+
+def check_password():
+    password = st.text_input("Contraseña", type="password")
+    if password == st.secrets["password"]:
+        st.session_state["authenticated"] = True
+        st.success("Acceso concedido.")
+        return True
+    else:
+        st.session_state["authenticated"] = False
+        if password != "":
+            st.error("Acceso denegado.")
+        return False
+
+if "authenticated" not in st.session_state or not st.session_state["authenticated"]:
+    if not check_password():
+        st.stop()
 
 if __name__ == "__main__":
     main()
